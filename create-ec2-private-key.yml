@@ -1,0 +1,92 @@
+---
+
+    - name: Create An EC2 SSH Key
+      hosts: localhost
+      connection: local
+      become: yes
+      become_user: root
+      gather_facts: false
+      tasks:
+
+      - name: 'SSH Key: EC2 Create'
+        ec2_key:
+          aws_access_key: "{{ lookup('env', 'MOE_AWS_ID') }}"
+          aws_secret_key: "{{ lookup('env', 'MOE_AWS_KEY') }}"
+          name: "{{ myhost | default('NEWHOST') }}"
+          region: "{{ ec2_rgn }}"
+          state: absent
+          force: yes
+        ignore_errors: no
+
+      - name: 'SSH Key: EC2 Create'
+        ec2_key:
+          aws_access_key: "{{ lookup('env', 'MOE_AWS_ID') }}"
+          aws_secret_key: "{{ lookup('env', 'MOE_AWS_KEY') }}"
+          name: "{{ myhost | default('NEWHOST') }}"
+          region: "{{ ec2_rgn }}"
+          state: present
+          force: yes
+        register: priv_key
+        ignore_errors: no
+
+      - debug:
+          msg: "New private key content: {{ priv_key }}"
+        when: priv_key.changed == False
+
+      - name: Get username
+        shell: "pwd | awk -F / '{print $3}'"
+        register: user
+
+      - debug:
+          msg: "Here is the output of user var {{ user }}"
+
+      - name: "SSH Key: Create File {{ myhost | default('NEWHOST') }}.pem"
+        file:
+          path: "./{{ myhost | default('NEWHOST') }}.pem"
+          state: touch
+          mode: 0600
+          owner: "{{ user.stdout }}"
+        when: priv_key.changed == True
+
+      - name: 'SSH Key: Content'
+        lineinfile:
+          path: "./{{ myhost | default('NEWHOST') }}.pem"
+          regexp: "^.*"
+          line: "{{ priv_key.key.private_key }}"
+          state: present
+          backup: yes
+        when: priv_key.changed == True
+
+      - name: Get My Public IP
+        command: curl ipinfo.io/ip
+        register: pub_ip
+
+      - name: Create EC2 Security Group
+        ec2_group:
+          description: "{{ myhost | default('NEWHOST') }}-web - PRODUCTION"
+          name: "{{ myhost | default('NEWHOST') }}-web"
+          vpc_id: "{{ vpc_id }}"
+          region: "{{ ec2_rgn }}"
+          purge_rules: no
+          aws_access_key: "{{ lookup('env', 'MOE_AWS_ID') }}"
+          aws_secret_key: "{{ lookup('env', 'MOE_AWS_KEY') }}"
+          rules:
+            - proto: tcp
+              ports:
+                - 22
+              cidr_ip: "{{ my_ip | default(pub_ip) }}"
+            - proto: icmp
+              from_port: 8
+              to_port: -1
+              cidr_ip: "{{ my_ip | default(pub_ip) }}"
+            - proto: tcp
+              ports:
+                - 80
+                - 443
+              cidr_ip: 0.0.0.0/0
+        register: ec2_sg_info
+        ignore_errors: no
+
+          
+      - debug:
+          var: ec2_sg_info          

@@ -1,0 +1,393 @@
+---
+# Usage:
+#   ansible-playbook deploy_infra.yml --tags describe-playbook
+#   ansible-playbook deploy_infra.yml --tags FULL -e 'system_name=demo rds_storage=200 rds_type=db.t2.medium'
+
+  - name: "Create  Infrastructure (EC2, EFS, Elasticache, RDS)"
+    hosts: localhost
+    connection: local
+    become: yes
+    become_user: root
+    gather_facts: false
+  
+    vars_prompt:
+      - name: "database_password"
+        prompt: "Enter master database password for {{ system_name }}"
+        private: yes
+    tags: FULL
+
+    tasks:
+    - name: "Describe Playbook: Overview" 
+      debug: 
+        msg: "This playbook is designed to create a basic AWS stack."
+      tags: describe-playbook
+
+    - name: "Describe Playbook: Extra Variables"
+      debug:
+        msg: "Variable '{{ item.name }}' is '{{ item.use }}'; default value = '{{ item.default }}'"
+      with_items:
+        - { name: "system_name", use: "MANDATORY", default: "N/A" }
+        - { name: "database_password", use: "MANDATORY", default: "N/A" }
+        - { name: "region", use: "OPTIONAL", default: "us-east-1" }
+        - { name: "ec2Type", use: "OPTIONAL", default: "t2.small" }
+        - { name: "ec2Zone", use: "OPTIONAL", default: "us-east-1d" }
+        - { name: "ec2VpcSubnetId", use: "OPTIONAL", default: "subnet-123123123" }
+        - { name: "memcachedType", use: "OPTIONAL", default: "cache.t2.micro" }
+        - { name: "memcachedZone", use: "OPTIONAL", default: "us-east-1c" }
+        - { name: "rds_storage", use: "OPTIONAL", default: "20" }
+        - { name: "rds_type", use: "OPTIONAL", default: "db.t2.small" }
+        - { name: "rds_version", use: "OPTIONAL", default: "10.3" }
+        - { name: "rds_region", use: "OPTIONAL", default: "us-east-1" }
+      tags: describe-playbook
+
+
+### Create web1
+    - name: "EC2: Create Security Group - FRONTEND"
+      ec2_group:
+        name: "{{ system_name }}-web1"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        description: "{{ system_name }}-web1"
+        vpc_id: "vpc-123456789"
+        region: "{{ region | default('us-east-1') }}"
+        purge_rules: false
+        rules:
+          - proto: tcp
+            ports:
+              - 80
+              - 443
+              - 22
+            cidr_ip: 0.0.0.0/0
+        purge_tags: no
+        tags: { Name: "{{ system_name }}-web1", District: "{{ system_name }}", BillTo: "{{ system_name }}" }
+      register: sg_web1
+      ignore_errors: True
+      tags: FULL, web1
+
+    - name: 'EC2: Create SSH Key'
+      ec2_key:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        name: "{{ system_name }}"
+        region: "{{ region | default('us-east-1') }}"
+        state: present
+        force: yes
+      register: ec2_key
+      ignore_errors: no
+      tags: FULL, web1
+
+    - name: "EC2: Get local machine username"
+      shell: "pwd | awk -F / '{print $3}'"
+      register: user
+      tags: FULL, web1
+
+    - name: "EC2: Create {{ system_name }}.pem "
+      file:
+        path: "/Users/{{ user }}/.ssh/{{ system_name }}.pem"
+        state: touch
+        mode: 0600
+        owner: "{{ user.stdout }}"
+      when: ec2_key.changed == True
+      tags: FULL, web1
+
+    - name: "EC2: Save Private Key Material"
+      lineinfile:
+        path: "~/.ssh/{{ system_name }}.pem"
+        regexp: "^.*"
+        line: "{{ ec2_key.key.private_key }}"
+        state: present
+        backup: yes
+      when: ec2_key.changed == True
+      tags: FULL, web1
+
+    - name: "EC2: Create Instance"
+      ec2:
+        id: "{{ system_name }}-web1-idempotent-identifier"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        key_name: "{{ system_name }}"
+        group: "{{ system_name }}-web1"
+        instance_type: "{{ ec2Type | default('t2.small') }}"
+        image: ami-BillTo9c4fc1
+        wait: no
+        wait_timeout: 500
+        count: 1
+        region: "{{ region | default('us-east-1') }}"
+        zone: "{{ ec2Zone | default('us-east-1d') }}"
+        instance_tags:
+          Name: "{{ system_name }}-web1"
+          Disctrict: "{{ system_name }}"
+          BillTo: "{{ system_name }}" 
+        volumes:
+          - device_name: /dev/sdb
+            volume_type: gp2
+            volume_size: 50
+            delete_on_termination: false
+        monitoring: yes
+        vpc_subnet_id: "{{ ec2VpcSubnetId | default('subnet-123123123') }}"
+        assign_public_ip: yes
+      register: ec2_info
+      tags: FULL, web1
+
+### Create web
+    - name: "EC2: Create Security Group - WEB"
+      ec2_group:
+        name: "{{ system_name }}"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        description: "{{ system_name }}"
+        vpc_id: "vpc-123456789"
+        region: "{{ region | default('us-east-1') }}"
+        purge_rules: false
+        rules:
+          - proto: tcp
+            ports:
+              - 80
+              - 443
+              - 22
+            cidr_ip: 0.0.0.0/0
+        purge_tags: no
+        tags: { Name: "{{ system_name }}", District: "{{ system_name }}", BillTo: "{{ system_name }}" }
+      register: sg_web
+      ignore_errors: True
+      when:
+      tags: FULL, web
+
+### Create efs
+    - name: "EC2: Create Security Group - EFS"
+      ec2_group:
+        state: present
+        description: "{{ system_name }}-efs"
+        name: "{{ system_name }}-efs"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        description: "{{ system_name }}-efs"
+        vpc_id: "vpc-123456789"
+        region: "{{ region | default('us-east-1') }}"
+        purge_rules: false
+        rules:
+          - proto: tcp
+            ports:
+              - 2049
+            group_name:
+              - "{{ sg_web1.group_id }}"
+        purge_tags: no
+        tags: { Name: "{{ system_name }}-efs", District: "{{ system_name }}", BillTo: "{{ system_name }}" }
+      register: sg_efs
+      ignore_errors: True
+      tags: FULL, efs
+
+    - name: "EFS: Create Filesystem"
+      efs:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        state: present
+        name: "{{ system_name }}-efs"
+        purge_tags: yes
+        encrypt: yes
+        region: "{{ region | default('us-east-1') }}"
+        tags:
+            Name: "{{ system_name }}-efs"
+            District: "{{ system_name }}"
+            BillTo: "{{ system_name }}"
+        targets:
+            - subnet_id: subnet-123123123
+              security_groups: "[ \"{{ sg_efs.group_id }}\" ]"
+            - subnet_id: subnet-456456456
+              security_groups: "[ \"{{ sg_efs.group_id }}\" ]"
+            - subnet_id: subnet-789789789
+              security_groups: "[ \"{{ sg_efs.group_id }}\" ]"
+      ignore_errors: false
+      register: efs_info
+      tags: FULL, efs
+
+
+### Create RDS
+    - name: "EC2: Create Security Group - RDS"
+      ec2_group:
+        state: present
+        description: "{{ system_name }}-rds"
+        name: "{{ system_name }}-rds"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        description: "{{ system_name }}-rds"
+        vpc_id: "vpc-123456789"
+        region: "{{ region | default('us-east-1') }}"
+        purge_rules: false
+        rules:
+          - proto: tcp
+            ports:
+              - 5432
+            group_name:
+              - "{{ sg_web1.group_id }}"
+        purge_tags: no
+        tags: { Name: "{{ system_name }}-rds", District: "{{ system_name }}", BillTo: "{{ system_name }}" }
+      register: sg_rds
+      ignore_errors: True
+      tags: FULL, rds
+
+
+    - name: "RDS: Create Subnet Group"
+      rds_subnet_group:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        region: "{{ rds_region | default('us-east-1') }}"
+        name: "{{ system_name }}-rds"
+        description: "{{ system_name }}-rds"
+        state: present
+        subnets:
+          - subnet-123123123
+          - subnet-456456456
+          - subnet-789789789
+      register: rds_subnet
+      tags: FULL, rds
+    
+    # http://jinja.pocoo.org/docs/2.10/templates/
+    - name: "RDS: Format Variable"
+      set_fact:
+        rds_pg_version: >
+                        "{% if '10' in rds_version %}
+                        10
+                        {% elif '11' in rds_version %}
+                        11
+                        {% else %}
+                        {{ rds_version }}
+                        {% endif %}"
+      when: rds_version is defined
+      tags: FULL, rds
+
+    - name: "RDS: Create Parameter Group"
+      rds_param_group:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        region: "{{ rds_region | default('us-east-1') }}"
+        name: "{{ system_name }}-rds"
+        description: "{{ system_name }}-rds"
+        state: present
+        engine: "postgres{{ rds_pg_version | default('10') }}"
+        purge_tags: true
+        region: "{{ rds_region | default('us-east-1') }}"
+        tags:
+            Name: "{{ system_name }}-rds"
+            District: "{{ system_name }}"
+            BillTo: "{{ system_name }}"
+      register: rds_prmgrp
+      tags: FULL, rds
+
+    - name: "RDS: Create Instance"
+      rds_instance:
+        state: present
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        allocated_storage: "{{ rds_storage | default('20') }}"
+        auto_minor_version_upgrade: false
+        backup_retention_period: 7
+        preferred_backup_window: 05:00-06:00
+        engine: postgres
+        engine_version: "{{ rds_version | default('10.3') }}"
+        db_name: postgres
+        db_instance_identifier: "{{ system_name }}-prod"
+        instance_type: "{{ rds_type | default('db.t2.small') }}"
+        storage_encrypted: yes
+        preferred_maintenance_window: Sun:02:00-Sun:03:00
+        multi_az: yes
+        db_parameter_group_name: "{{ system_name }}-rds"
+        master_username: "{{ system_name }}"
+        master_user_password: "{{ database_password }}"
+        publicly_accessible: yes
+        region: "{{ rds_region | default('us-east-1') }}"
+        db_subnet_group_name: "{{ system_name }}-rds"
+        vpc_security_group_ids: "{{ sg_rds.group_id }}"
+        tags:
+            Name: "{{ system_name }}-rds"
+            District: "{{ system_name }}"
+            BillTo: "{{ system_name }}"
+        copy_tags_to_snapshot: yes
+        wait: no
+      register: rds_info
+
+### Create elasticache
+    - name: "EC2: Create Security Group - Elasticache"
+      ec2_group:
+        state: present
+        description: "{{ system_name }}-cache"
+        name: "{{ system_name }}-cache"
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        description: "{{ system_name }}-cache"
+        vpc_id: "vpc-123456789"
+        region: "{{ region | default('us-east-1') }}"
+        purge_rules: false
+        rules:
+          - proto: tcp
+            ports:
+              - 11211
+            group_name:
+              - "{{ sg_web1.group_id }}"
+        purge_tags: no
+        tags: { Name: "{{ system_name }}-cache", District: "{{ system_name }}", BillTo: "{{ system_name }}" }
+      register: cache_secgrp
+      ignore_errors: True
+      tags: FULL, cache
+
+    - name: "Elasticache: Create Parameter Group"
+      elasticache_parameter_group:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        region: "{{ region | default('us-east-1') }}"
+        name: "{{ system_name }}-memcached"
+        group_family: "memcached1.4"
+        description: "{{ system_name }}-memcached"
+        state: "present"
+      register: cache_prmgrp
+      tags: FULL, cache
+
+    - name: "Elasticache: Create Subnet Group"
+      elasticache_subnet_group:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        region: "{{ region | default('us-east-1') }}"
+        name: "{{ system_name }}-cache"
+        description: "{{ system_name }}-memcached"
+        state: "present"
+        subnets:
+          - subnet-123123123
+          - subnet-456456456
+          - subnet-789789789
+      register: cache_subnet
+      tags: FULL, cache
+
+    - name: "Elasticache: Create Memcached Instance"
+      elasticache:
+        aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+        name: "{{ system_name }}-cache"
+        state: present
+        engine: memcached
+        cache_engine_version: 1.4.14
+        node_type: "{{ memcachedType | default('cache.t2.micro') }}"
+        num_nodes: 1
+        cache_port: 11211
+        cache_subnet_group: "{{ system_name }}-cache"
+        security_group_ids: 
+          - "{{ cache_secgrp.group_id }}"
+        zone: "{{ memcachedZone | default('us-east-1c') }}"
+        region: "{{ region | default('us-east-1') }}"
+      register: cache_info
+      tags: FULL, cache
+
+### Output logs
+#    - name: Log Status
+#      debug:
+#        msg: "{{ item.name }} = {{ item.value }}"
+#      with_items:
+#        - { name: "SECURITY GROUP: FRONTEND", value: "{{ sg_web1.group_id }}" }
+#        - { name: "INFO: FRONTEND", value: "{{ ec2_info.instances }}" }
+#        - { name: "SECURITY GROUP: WEB", value: "{{ sg_web.group_id }}" }
+#        - { name: "SECURITY GROUP: EFS", value: "{{ sg_efs.group_id }}" }
+#        - { name: "INFO: EFS", value: "{{ efs_info.efs.filesystem_address }}" }
+#        - { name: "INFO: Elasticache", value: "{{ cache_info.elasticache.data.ConfigurationEndpoint.Address }}:{{ cache_info.elasticache.data.ConfigurationEndpoint.Port }}" }
+#        - { name: "INFO: RDS", value: "{{ rds_info.endpoint.address }}" }
+#      tags: FULL
+
+

@@ -1,0 +1,154 @@
+#!/bin/bash
+### Collection of shell functions
+
+
+############
+# -> Set export sensitive info only into the existing shell from encrypted vault
+reveal(){
+tmpFile=$(mktemp fileXXXX)
+ansible-vault view ~/path/to/encrypted/.vaultfile > $tmpFile
+a=($(cat $tmpFile))
+export ${a[0]}
+export ${a[1]}
+unset a
+rm -f $tmpFile
+}
+############
+############
+############
+# -> SSH to EC2 Instances with dynamically changed DNS names
+
+connect-me(){
+if [ $# -ne 1 ]; then
+	echo Sorry - please supply the instance ID you wish to connect to as the only arg.
+	exit 2
+fi
+for pkg in jq nc aws; do
+	which $pkg &> /dev/null; [ $? -ne 0 ] && echo CLI tool $pkg is required. && exit 1
+done
+aws ec2 --profile $PRF --region $RGN start-instances --instance-ids $1
+NAME=$(aws ec2 --profile $PRF --region $RGN describe-instances | jq -r ".Reservations[].Instances[].PublicDnsName")
+until nc $NAME 22 -z; do echo Waiting 5 seconds before trying to ssh again.; sleep 5;done; ssh $NAME -l ec2-user -i ~/.ssh/$my_600.pem
+}
+
+############
+############
+############
+# -> Add iptables rule to kvm host for ODBC to postgres guest
+
+ODBC-INSERT() {
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+vers=1.1
+
+### Check if superuser
+if [[ $EUID -ne 0 ]]; then
+   printf "This function can only be run as ${RED}root${NC}.\n" 1>&2
+   exit 1
+fi
+
+usage(){
+printf -- "
+Description: Add FW rules for $GUEST and update pb_hba.conf
+Arguments:
+    ${BLUE}-h${NC} (help and usage msg)
+${RED}Requires${NC}:
+    ${RED}IP address${NC} (1.2.3.4)
+    Short ${RED}description${NC}
+
+${BLUE}Version $vers${NC}
+"
+}
+
+if [ $# -gt 0 ]; then
+    usage
+    return
+fi
+
+printf "
+Add firewall rules for $GUEST on 5432
+${BLUE}Enter the new IP${NC}: "
+read newIP
+
+### Check for valid ip address and that ports can connect as expected of a webserver
+which nc &> /dev/null
+if [ $? -ne 0 ]; then
+        printf "${RED}ERROR - please install utility 'nc' \n"
+        return 1
+fi
+
+nc $newIP 443 -z &> /dev/null && nc $newIP 22 -z &> /dev/null
+if [ $? -ne 0 ]; then
+    printf "${RED}ERROR - cannot connect to ports 22 or 443 on $newIP ${NC} \n"
+    return 1
+fi
+printf "${BLUE}Enter Description${NC}: "
+read INFO
+
+### VARS
+vmIP=$GUEST
+PSQL_VERS=10
+PROTO=tcp
+PORT=5432
+pgHba=/path/to/lib/pgsql/$PSQL_VERS/data/pg_hba.conf
+uid=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)
+script="/tmp/ip-rule-${uid}.sh"
+
+### <Functions and scripts>
+cat <<EOF > $script
+grep -q $newIP $pgHba
+if [ $? -ne 0 ]; then
+    echo hostssl all $DB_USERNAME $newIP/32 md5 \#Inserted via ODBC-INSERT >> $pgHba
+    service postgresql-$PSQL_VERS reload
+    printf "\n\nDONE\n"
+else
+    echo $newIP already found in $pgHba on $GUEST
+    exit 2
+fi
+EOF
+
+new_iptables_rules(){
+iptables -t nat -A PREROUTING -s ${newIP}/32 -p ${PROTO} --dport ${PORT} -j DNAT --to ${vmIP}:${PORT} -m comment --comment "${INFO}"
+if [ $? -ne 0 ]; then
+    rm -f $script
+    return 1
+fi
+iptables -I FORWARD -s ${newIP}/32 -p ${PROTO} -m state --state NEW -m ${PROTO} --dport ${PORT} -m comment --comment "${INFO}" -j ACCEPT
+if [ $? -ne 0 ]; then
+    rm -f $script
+    return 1
+fi
+echo Rules applied successfully
+}
+
+### </Functions and scripts>
+
+### Check for similar rules and exit if found
+iptables -L -n | grep .*$newIP.*$PORT.*
+if [ $? -eq 0 ]; then
+    printf "\n${RED}Found a similar rule in FORWARD chain - exiting.${NC}\n"
+    rm -f $script
+        return 2
+fi
+iptables -L -n -t nat | grep .*$newIP.*$vmIP.*
+if [ $? -eq 0 ]; then
+    printf "\n${RED}Found a similar rule in PREROUTING chain - exiting.${NC}\n"
+    rm -f $script
+        return 2
+fi
+
+### Print iptables rules being executed to stdout
+printf -- "
+Applying these rules now: \n
+iptables -t nat -A PREROUTING -s ${RED}${newIP}/32${NC} -p ${RED}${PROTO}${NC} --dport ${RED}${PORT}${NC} -j DNAT --to ${RED}${vmIP}:${PORT}${NC} -m comment --comment '${RED}${INFO}${NC}'
+iptables -I FORWARD -s ${RED}${newIP}/32${NC} -p ${RED}${PROTO}${NC} -m state --state NEW -m ${RED}${PROTO}${NC} --dport ${RED}${PORT}${NC} -m comment --comment '${RED}${INFO}${NC}' -j ACCEPT
+"
+
+### Apply iptables rules
+new_iptables_rules
+
+### Run script on $GUEST ($vmIP)
+ssh $vmIP "bash -s" < $script
+rm -f $script
+}
