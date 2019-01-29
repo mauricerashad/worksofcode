@@ -1,0 +1,49 @@
+---
+- name: "Deploy Infrastructure"
+  become: False
+  gather_facts: True
+  connection: local
+  hosts: localhost
+
+  roles:
+  - discovery
+  - ec2
+  - jenkins
+
+# Jenkins galaxy install: https://github.com/geerlingguy/ansible-role-jenkins/blob/master/README.md
+- name: "Jenkins: Configure"
+  become: True
+  become_user: root
+  connection: ssh
+  gather_facts: True
+  hosts: jenkins
+  vars:
+    IP_JKNS: "{{ hostvars['localhost']['ec2_pubIp_jkns'] }}"
+    LOCALUSER: "{{ hostvars['localhost']['ansible_user_dir'] }}"
+    jenkins_hostname: "{{ IP_JKNS }}"
+    jenkins_plugins: ['github']
+    jenkins_plugins_state: "latest"
+    jenkins_pkg_url: "http://pkg.jenkins-ci.org/redhat/"
+    jenkins_url_prefix: "/jenkins"
+
+  roles:
+  - role: geerlingguy.java
+    become: yes
+  - role: geerlingguy.jenkins
+    become: yes
+  - automation
+
+- name: "Notejam: Configure and Launch"
+  become: True
+  become_user: root
+  connection: ssh
+  gather_facts: False
+  hosts: notejam
+  vars:
+    IP: "{{ hostvars['localhost']['ec2_pubIp'] }}"
+    PUBKEY_JKNS: "{{ hostvars['localhost']['pubkey_jkns'] }}"
+
+  roles:
+  - os
+  - app
+

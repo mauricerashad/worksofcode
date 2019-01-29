@@ -1,0 +1,138 @@
+---
+# OS Security
+- name: "CENTOS: Disable SELinux Runtime"
+  command: setenforce 0
+  tags: create-all, os
+
+- name: "CENTOS: Disable SELinux Permanently"
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: "^SELINUX=.*"
+    line: "SELINUX=disabled"
+    state: present
+    backup: yes
+  tags: create-all, os
+
+- name: "CENTOS: Install epel-release"
+  yum: 
+    name: epel-release, https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm, http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+  tags: create-all, os
+
+- name: "CENTOS: Install Required Packages"
+  yum:
+    name: ansible, htop, vim, nc, bind-utils, git, nginx, php56, php-fpm, phpunit, php-mcrypt, php-pdo
+  tags: create-all, os
+
+- name: "CENTOS: Check if Swap Exists"
+  command: ls /swap
+  register: swp
+  ignore_errors: true
+  tags: create-all, os
+
+- name: "CENTOS: Make Swap"
+  command: "{{ item.cmd }}"
+  with_items:
+    - { cmd: "dd if=/dev/zero of=/swap count=4096 bs=1MiB" }
+    - { cmd: "chmod 600 /swap" }
+    - { cmd: "mkswap /swap" }
+    - { cmd: "swapon /swap" }
+  when: swp.rc != 0
+  tags: create-all, os
+
+- name: "NGINX: Config "
+  template:
+    src: roles/os/templates/nginx.conf
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: 0644
+    force: yes
+    backup: yes
+  tags: create-all, os
+
+- name: "PHP-FPM: Config"
+  template:
+    src: "roles/os/templates/{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: 0644
+    force: yes
+  with_items:
+    - { src: "www.conf", dest: "/etc/php-fpm.d/www.conf" }
+    - { src: "php.ini", dest: "/etc/php.ini" }
+  tags: create-all, os
+
+- name: "NOTEJAM: Prepare Paths"
+  file:
+    state: directory
+    path: "{{ item.path }}"
+    mode: 0755
+    owner: nginx
+    group: nginx
+  with_items:
+    - { path: "/var/www/" }
+    - { path: "/var/www/html/" }
+  tags: create-all, os
+
+- name: Gen Random Password
+  shell: "openssl rand -base64 32 | sed -e 's/=//g' -e 's@/@-@' -e 's@/@A@g' -e 's/@/&/g'"
+  register: pswd
+  tags: create-all, os
+
+- name: Create Jenkins User
+  user:
+    name: jenkins
+    password: "{{ pswd.stdout | password_hash('sha512') }}" 
+    state: present
+  tags: create-all, os
+
+- name: Add Jenkins Authorized Keys
+  file:
+    path: "/home/jenkins/{{ item.path }}"
+    mode: 0600
+    owner: jenkins
+    group: jenkins
+    state: directory
+  with_items:
+    - { path: ".ssh" }
+  tags: create-all, os
+
+- name: Add Jenkins Authorized Keys
+  file:
+    path: "/home/jenkins/{{ item.path }}"
+    mode: 0600
+    owner: jenkins
+    group: jenkins
+    state: touch
+  with_items:
+    - { path: ".ssh/authorized_keys" }
+  tags: create-all, os
+
+- name: Add Jenkins PublicKey
+  blockinfile:
+    state: present
+    path: /home/jenkins/.ssh/authorized_keys
+    block: |
+      {{ PUBKEY_JKNS }}
+  tags: create-all, os
+
+- name: Allow Jenkins to Execute CI Script
+  lineinfile:
+    dest: /etc/sudoers
+    state: present
+    regexp: '^jenkins'
+    line: '%jenkins ALL=(ALL) NOPASSWD: /home/jenkins/github_ci.sh'
+    validate: 'visudo -cf %s'
+  tags: create-all, os
+
+- name: Add github_ci.sh
+  template:
+    src: roles/os/templates/github_ci.sh
+    dest: /home/jenkins/github_ci.sh
+    owner: jenkins
+    group: jenkins
+    mode: 0600
+    force: yes
+  tags: create-all, os
+

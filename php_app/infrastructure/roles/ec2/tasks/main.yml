@@ -1,0 +1,179 @@
+---
+# SECURITY
+- name: "EC2: Create Security Group"
+  ec2_group:
+    name: "notejam_secgrp"
+    aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+    aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+    description: "notejam"
+    vpc_id: "vpc-e2258998"
+    region: "{{ region | default('us-east-1') }}"
+    purge_rules: false
+    rules:
+    - proto: tcp
+      ports:
+        - 22
+        - 80
+        - 443
+      cidr_ip: 0.0.0.0/0
+    purge_tags: no
+    tags: { Name: "notejam_secgrp", BillTo: "client" }
+  register: ec2_secgrp
+  ignore_errors: True
+  tags: create-all, ec2-security
+
+
+- name: "EC2: Create SSH Key"
+  ec2_key:
+    aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+    aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+    name: "notejam"
+    region: "{{ region | default('us-east-1') }}"
+    state: present
+    force: yes
+  register: ec2_sshkey
+  ignore_errors: no
+  tags: create-all, ec2-security
+
+- name: "EC2: Ensure SSH Key && Ansible Host File"
+  file:
+    path: "{{ item.path }}"
+    mode: "{{ item.mode }}"
+    state: "{{ item.state }}"
+    owner: "{{ item.owner }}"
+  with_items:
+    - { path: "~/.ssh", mode: "0700", state: "directory", owner: "{{ ansible_user_id }}" }
+    - { path: "~/.ssh/notejam.pem", mode: "0700", state: "touch", owner: "{{ ansible_user_id }}" }
+  when: ec2_sshkey.changed == True
+  ignore_errors: True
+  tags: create-all, ec2-security
+
+- name: "EC2: Save Private Key (1/2)"
+  shell: echo "" > ~/.ssh/notejam.pem
+  when: ec2_sshkey.changed == True
+  tags: create-all, ec2-security
+  ignore_errors: true
+
+- name: "EC2: Save Private Key (2/2)"
+  lineinfile:
+    path: ~/.ssh/notejam.pem
+    regexp: "^.*"
+    line: "{{ ec2_sshkey.key.private_key }}"
+    state: present
+    backup: yes
+  when: ec2_sshkey.changed == True
+  register: ec2_sshkey_status
+  ignore_errors: False
+  tags: create-all, ec2-security
+
+
+# PROVISION EC2 HOST
+# 1) CENTOS 7 AMIs: https://wiki.centos.org/Cloud/AWS
+# 2) discover AMIs: aws --region us-east-1 ec2 describe-images --owners aws-marketplace --filters Name=product-code,Values=aw0evgkw8e5c1q413zgy5pjce
+
+- name: "EC2: Create Instance"
+  ec2:
+    id: "notejam-idempotent-identifier001"
+    aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+    aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+    key_name: "notejam"
+    group: "notejam_secgrp"
+    instance_type: "{{ ec2_type | default('t2.micro') }}"
+    image: ami-02e98f78
+    wait: yes
+    wait_timeout: 600
+    count: 1
+    region: "{{ ec2_region | default('us-east-1') }}"
+    zone: "{{ ec2_zone | default('us-east-1c') }}"
+    instance_tags:
+      Name: "notejam"
+      BillTo: "client"
+    volumes:
+      - device_name: /dev/sda1
+        volume_type: gp2
+        volume_size: 15
+        delete_on_termination: True
+    monitoring: no
+    vpc_subnet_id: "{{ ec2_vpcId | default('subnet-bcca59db') }}"
+    assign_public_ip: yes
+  register: ec2_info
+  tags: create-all, ec2-host
+  notify:
+    - DISCOVERY
+
+- debug: var=ec2_info
+
+- name: Wait for SSH on notejam
+  wait_for:
+    host: "{{ ec2_info.instances.0.public_ip }}"
+    port: 22
+    state: started
+    delay: 10
+    timeout: 300
+  when: ec2_info.changed == true
+  tags: create-all, ec2-host
+
+- name: "EC2: Discover Public IP"
+  ec2_instance_facts:
+    aws_access_key: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+    aws_secret_key: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+    region: us-east-1
+    filters:
+      tag:Name: notejam
+      instance-state-name: "running"
+      instance-state-code: "16"
+  register: disc
+  when: ec2_info.changed == false
+  tags: create-all, ec2-host
+
+- debug: 
+    msg: "{{ ec2_info.instances.0.public_ip }} and {{ ec2_info.instances.0 }}"
+  tags: create-all, ec2-host
+
+- name: "EC2: Set ec2_pubIp Fact"
+  set_fact:
+    ec2_pubIp: "{{ disc.instances.0.public_ip_address }}"
+  when: disc is not skipped
+  tags: create-all, ec2-host
+
+- name: "EC2: Set ec2_pubIp Fact"
+  set_fact:
+    ec2_pubIp: "{{ ec2_info.instances.0.public_ip }}"
+  when: ec2_info is not skipped 
+  tags: create-all, ec2-host
+
+- name: "Set Fact"
+  set_fact:
+    ec2_prvKey: "{{ ansible_user_dir }}/.ssh/notejam.pem"
+
+
+- name: "Ensure Hosts File"
+  file:
+    path: "{{ item.path }}"
+    mode: "{{ item.mode }}"
+    state: "{{ item.state }}"
+    owner: "{{ item.owner }}"
+  with_items:
+    - { path: "{{ ansible_user_dir }}/ANSIBLE", mode: "0755", state: "directory", owner: "{{ ansible_user_id }}" }
+    - { path: "{{ ansible_user_dir }}/ANSIBLE/notejam", mode: "0755", state: "touch", owner: "{{ ansible_user_id }}" }
+  ignore_errors: False
+  tags: create-all, ec2-security
+
+- name: "LOCALHOST: Create host in {{ ansible_user_dir }}/ANSIBLE"
+  lineinfile:
+    path:  "{{ ansible_user_dir }}/ANSIBLE/notejam"
+    line: "{{ item.line }}"
+  with_items:
+    - { line: "[notejam]" }
+  tags: create-all, ec2-security
+
+- debug: var=ec2_pubIp
+  tags: create-all, ec2-host
+
+
+
+
+
+
+
+

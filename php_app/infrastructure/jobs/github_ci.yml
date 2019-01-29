@@ -1,0 +1,10 @@
+- job:
+    name: github_ci
+    parameters:
+      - string:
+          name: Github CI
+          default: Build on Github Commit
+    description: 'Build on Github Commit'
+    project-type: freestyle
+    builders:
+      - shell: "ssh -o StrictHostKeyChecking=no jenkins@3.93.39.94 '/bin/bash /home/jenkins/github_ci.sh'"

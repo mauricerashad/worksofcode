@@ -1,0 +1,43 @@
+---
+- name: "NOTEJAM: Set Fact"
+  set_fact:
+    APP: "/var/www/html/notejam/laravel/notejam"
+  tags: create-all, app
+
+- name: "NOTEJAM: Clone NoteJam Fork"
+  git: 
+    repo: https://github.com/mauricerashad/notejam.git
+    dest: /var/www/html/notejam
+    update: no
+  tags: create-all, app
+
+- name: "NOTEJAM: Setup"
+  command: "ls {{ APP }}/app/database/notejam.db"
+  register: INIT
+  ignore_errors: true
+  tags: create-all, app
+
+- name: "NOTEJAM: Initialize"
+  shell: "{{ item.cmd }}"
+  with_items:
+    - { cmd: "cd {{ APP }}; curl -s https://getcomposer.org/installer | php" }
+    - { cmd: "cd {{ APP }}; php composer.phar install" }
+    - { cmd: "touch {{ APP }}/app/database/notejam.db" }
+    - { cmd: "cd {{ APP }}; yes | php artisan migrate" }
+    - { cmd: "sed -i -e '/host address to serve/s/localhost/{{ IP }}/' -e '/host address to serve/s/[0-9].*[0-9]/{{ IP }}/' {{ APP }}/vendor/laravel/framework/src/Illuminate/Foundation/Console/ServeCommand.php" }
+  when: INIT.rc != 0
+  tags: create-all, app
+    
+- name: "NOTEJAM: Start"
+  shell: "{{ item.cmd }}"
+  with_items:
+    - { cmd: "systemctl enable php-fpm" }
+    - { cmd: "systemctl enable nginx" }
+    - { cmd: "chown -R nginx.nginx /var/www/html/" }
+    - { cmd: "php-fpm -t" }
+    - { cmd: "nginx -t" }
+    - { cmd: "systemctl restart php-fpm" }
+    - { cmd: "systemctl restart nginx" }
+  notify:
+    - SUMMARY
+  tags: create-all, app

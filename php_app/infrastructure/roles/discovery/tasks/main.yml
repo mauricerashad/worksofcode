@@ -1,0 +1,9 @@
+---
+# IMPORTANT: Ensure tags accross all plays and tasks are added to these discovery jobs
+- name: Discovery
+  command: ls
+  notify:
+    - DISCOVERY
+    - DISCOVERY_JKNS
+  tags: discovery, create-all, ec2-host, ec2-security, os, app, jenkins
+

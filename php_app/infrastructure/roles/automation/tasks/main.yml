@@ -1,0 +1,40 @@
+---
+- name: "CENTOS: Check if Swap Exists"
+  command: ls /swap
+  register: swp
+  ignore_errors: true
+  tags: create-all, os
+
+- name: "CENTOS: Make Swap"
+  command: "{{ item.cmd }}"
+  with_items:
+    - { cmd: "dd if=/dev/zero of=/swap count=4096 bs=1MiB" }
+    - { cmd: "chmod 600 /swap" }
+    - { cmd: "mkswap /swap" }
+    - { cmd: "swapon /swap" }
+  when: swp.rc != 0
+  tags: create-all, os
+
+- name: "CENTOS: Disable SELinux Runtime"
+  command: setenforce 0
+  tags: create-all, os
+
+- name: "CENTOS: Disable SELinux Permanently"
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: "^SELINUX=.*"
+    line: "SELINUX=disabled"
+    state: present
+    backup: yes
+  tags: create-all, os
+
+- name: "CENTOS: Install epel-release"
+  yum: 
+    name: epel-release
+  tags: create-all, os
+
+- name: "CENTOS: Install Required Packages"
+  yum:
+    name: ansible, htop, vim
+  tags: create-all, os
+

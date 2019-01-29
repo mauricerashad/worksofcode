@@ -1,0 +1,4 @@
+---
+- name: SUMMARY
+  debug:
+    msg: "Notejam is accessible at http://{{ IP }}/index.php"
